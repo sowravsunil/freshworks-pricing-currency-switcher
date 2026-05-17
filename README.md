@@ -1,2 +1,5 @@
-# freshworks-pricing-currency-switcher
-Unofficial chrome extension for account managers to switch price currency in freshworks pricing page.
+# Freshworks Pricing Currency Switcher
+
+**Disclaimer:** This is an unofficial, community-built Chrome extension. It is not affiliated with, endorsed by, or created by Freshworks Inc. Freshworks is a trademark of Freshworks Inc.
+
+This extension helps Account Managers view Freshworks pricing pages in different currencies (USD, INR, EUR, GBP, AUD).
