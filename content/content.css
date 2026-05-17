@@ -1,0 +1,311 @@
+/* Freshworks Pricing Currency Switcher — injected overlay styles */
+
+#fw-cs-overlay {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 2147483647;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+  color: #1a1a2e;
+}
+
+/* ── Badge ── */
+
+.fw-cs-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 16px;
+  background: #1a1a2e;
+  color: #ffffff;
+  border-radius: 24px;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  user-select: none;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.4px;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.fw-cs-badge:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 7px 22px rgba(0, 0, 0, 0.28);
+}
+
+.fw-cs-badge-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+/* ── Panel ── */
+
+.fw-cs-panel {
+  display: none;
+  flex-direction: column;
+  position: absolute;
+  bottom: 52px;
+  right: 0;
+  width: 360px;
+  max-height: 480px;
+  background: #ffffff;
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.fw-cs-panel.visible {
+  display: flex;
+}
+
+.fw-cs-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: #1a1a2e;
+  color: #ffffff;
+  flex-shrink: 0;
+}
+
+.fw-cs-panel-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+
+.fw-cs-panel-close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.65);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: color 0.1s;
+}
+
+.fw-cs-panel-close:hover {
+  color: #ffffff;
+}
+
+/* ── Currency selector row ── */
+
+.fw-cs-cur-row {
+  display: flex;
+  gap: 6px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #f0f0f0;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.fw-cs-cur-btn {
+  padding: 5px 11px;
+  border: 1.5px solid #ddd;
+  background: #ffffff;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: #444;
+  font-family: inherit;
+  transition: all 0.14s ease;
+  white-space: nowrap;
+}
+
+.fw-cs-cur-btn:hover {
+  border-color: #1a1a2e;
+  color: #1a1a2e;
+}
+
+.fw-cs-cur-btn.active {
+  background: #1a1a2e;
+  border-color: #1a1a2e;
+  color: #ffffff;
+}
+
+/* ── Plan list ── */
+
+.fw-cs-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 14px;
+}
+
+.fw-cs-content::-webkit-scrollbar {
+  width: 4px;
+}
+.fw-cs-content::-webkit-scrollbar-thumb {
+  background: #d0d0d0;
+  border-radius: 2px;
+}
+
+.fw-cs-plan {
+  padding: 10px 6px;
+  border-bottom: 1px solid #f5f5f5;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.1s;
+}
+
+.fw-cs-plan:last-child {
+  border-bottom: none;
+}
+
+.fw-cs-plan:hover {
+  background: #f8f8ff;
+}
+
+.fw-cs-plan-name {
+  font-weight: 700;
+  font-size: 13px;
+  color: #1a1a2e;
+  margin-bottom: 5px;
+}
+
+.fw-cs-plan-prices {
+  display: flex;
+  gap: 18px;
+}
+
+.fw-cs-price-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.fw-cs-price-label {
+  font-size: 10px;
+  color: #999;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.fw-cs-price-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #222;
+}
+
+.fw-cs-empty {
+  text-align: center;
+  color: #aaa;
+  font-size: 13px;
+  padding: 24px 0;
+  margin: 0;
+}
+
+.fw-cs-panel-footer {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  background: #fafafa;
+  border-top: 1px solid #f0f0f0;
+  font-size: 11px;
+  color: #bbb;
+  text-align: center;
+}
+
+/* ── Compare modal ── */
+
+#fw-cs-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+}
+
+#fw-cs-modal.visible {
+  display: block;
+}
+
+.fw-cs-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.fw-cs-modal-box {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 440px;
+  max-width: calc(100vw - 32px);
+  background: #ffffff;
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+}
+
+.fw-cs-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  background: #1a1a2e;
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.fw-cs-modal-close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.65);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 4px;
+  font-family: inherit;
+  transition: color 0.1s;
+}
+
+.fw-cs-modal-close:hover {
+  color: #ffffff;
+}
+
+.fw-cs-modal-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.fw-cs-modal-table th {
+  background: #f5f5f8;
+  padding: 10px 16px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #666;
+  border-bottom: 1px solid #ebebeb;
+}
+
+.fw-cs-modal-table td {
+  padding: 11px 16px;
+  border-bottom: 1px solid #f5f5f5;
+  color: #333;
+}
+
+.fw-cs-modal-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.fw-cs-modal-table .fw-cs-td-cur {
+  font-weight: 700;
+  color: #1a1a2e;
+}
+
+.fw-cs-tr-active {
+  background: #f0f4ff;
+}
+
+.fw-cs-tr-active .fw-cs-td-cur {
+  color: #2a3f9e;
+}
