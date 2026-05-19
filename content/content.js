@@ -21,6 +21,10 @@
   let pricingTable = [];
   let selectedCurrency = 'USD';
   let currentDisplayCurrency = null;
+  let originalPageCurrency = null;
+  let activeConversionMap = null;
+  let activeFromCurrency = null;
+  let activeToCurrency = null;
   let domObserver = null;
   let observerDebounce = null;
   let lastUrl = location.href;
@@ -30,9 +34,11 @@
   function toNum(val) {
     if (val === null || val === undefined) return null;
     if (typeof val === 'number') return isNaN(val) ? null : val;
-    // Prices come as strings like "2,099" or "19" — strip commas before parsing
+    // Strip commas, then extract leading number (handles "399/pass", "2399/agent/month")
     const cleaned = String(val).replace(/,/g, '');
-    const n = Number(cleaned);
+    const match = cleaned.match(/^(\d+(?:\.\d+)?)/);
+    if (!match) return null;
+    const n = Number(match[1]);
     return isNaN(n) ? null : n;
   }
 
@@ -41,6 +47,9 @@
     if (isNaN(num)) return String(amount);
     const info = CURRENCIES[currency];
     const locale = info ? info.locale : 'en-US';
+    if (num !== Math.floor(num)) {
+      return num.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
     return num.toLocaleString(locale, { maximumFractionDigits: 0 });
   }
 
@@ -54,7 +63,6 @@
 
   // ── Data extraction ────────────────────────────────────────────────────────
 
-  // Recursively collect objects that have priceUsd/priceInr/etc fields
   function collectRawPriceObjects(obj, visited = new WeakSet(), results = []) {
     if (!obj || typeof obj !== 'object') return results;
     if (visited.has(obj)) return results;
@@ -76,14 +84,12 @@
     return results;
   }
 
-  // Collect localePrices arrays — these contain objects with .fields.currency/.fields.monthly/.fields.annual
   function collectLocalePriceGroups(obj, visited = new WeakSet(), groups = []) {
     if (!obj || typeof obj !== 'object') return groups;
     if (visited.has(obj)) return groups;
     visited.add(obj);
 
     if (Array.isArray(obj)) {
-      // Check if this array contains entityItemPrice-style objects (under .fields)
       const isLocaleGroup =
         obj.length >= 2 &&
         obj.every(
@@ -95,7 +101,6 @@
             (item.fields.monthly !== undefined || item.fields.annual !== undefined)
         );
       if (isLocaleGroup) {
-        // Flatten to direct currency/monthly/annual format
         const flat = obj.map(item => ({
           currency: item.fields.currency,
           monthly: item.fields.monthly,
@@ -104,7 +109,6 @@
         groups.push(flat);
       }
 
-      // Also check for direct format (no .fields wrapper)
       const isDirectGroup =
         obj.length >= 2 &&
         obj.every(
@@ -134,7 +138,6 @@
     const table = [];
 
     function addEntry(entry) {
-      // Must have at least one valid price
       const hasAny = Object.keys(CURRENCIES).some(
         c => entry[c].monthly !== null || entry[c].annual !== null
       );
@@ -148,7 +151,6 @@
       table.push(entry);
     }
 
-    // From objects with priceUsd / priceInr / ... fields
     const rawObjects = collectRawPriceObjects(nextData);
     log('Raw price objects found:', rawObjects.length);
 
@@ -164,7 +166,6 @@
       addEntry(entry);
     }
 
-    // From localePrices / entityItemPrice arrays
     const entityGroups = collectLocalePriceGroups(nextData);
     log('Entity/locale price groups found:', entityGroups.length);
 
@@ -193,7 +194,7 @@
     return table;
   }
 
-  // ── Currency detection ───────────────────────────────────────────────────��─
+  // ── Currency detection ─────────────────────────────────────────────────────
 
   function detectCurrentCurrency() {
     const text = document.body.innerText.slice(0, 15000);
@@ -205,7 +206,7 @@
     return 'USD';
   }
 
-  // ── Conversion map ───────────────────────────────────────────────────��─────
+  // ── Conversion map ─────────────────────────────────────────────────────────
 
   function buildConversionMap(fromCurrency, toCurrency) {
     const map = {};
@@ -229,10 +230,19 @@
         if (fromNumFormatted.length >= 2) {
           map[fromNumFormatted] = toNumberOnly;
         }
-        // Raw number string without formatting (only if 2+ chars to avoid false matches)
+        // Raw number string (only if 2+ chars to avoid false matches)
         const rawStr = String(Math.round(fromVal));
         if (rawStr.length >= 2 && !map[rawStr]) {
           map[rawStr] = toNumberOnly;
+        }
+        // Decimal values: add minimal form too (e.g., "1.5" alongside "1.50")
+        if (fromVal !== Math.floor(fromVal)) {
+          const fromInfo = CURRENCIES[fromCurrency];
+          const minForm = fromVal.toLocaleString(fromInfo.locale, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+          if (minForm !== fromNumFormatted && minForm.length >= 2) {
+            if (!map[minForm]) map[minForm] = toNumberOnly;
+            if (!map[fromInfo.symbol + minForm]) map[fromInfo.symbol + minForm] = toFormatted;
+          }
         }
       }
     }
@@ -247,8 +257,8 @@
     const toSymbol = CURRENCIES[toCurrency].symbol;
     let replacedCount = 0;
     let symbolCount = 0;
+    const replacedSymbolNodes = [];
 
-    // Sort map keys by length descending so we try longer matches first
     const sortedKeys = Object.keys(conversionMap).sort((a, b) => b.length - a.length);
 
     const walker = document.createTreeWalker(
@@ -260,7 +270,6 @@
     const textNodes = [];
     let node;
     while ((node = walker.nextNode())) {
-      // Skip script/style elements
       const parent = node.parentElement;
       if (parent && (parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE' || parent.tagName === 'NOSCRIPT')) {
         continue;
@@ -275,21 +284,22 @@
       const trimmed = originalText.trim();
       if (!trimmed) continue;
 
-      // Try exact match first (most common for price spans like "$19")
+      // Exact match (most common for price spans like "$19" or "4,299")
       if (conversionMap[trimmed] !== undefined) {
         textNode.textContent = originalText.replace(trimmed, conversionMap[trimmed]);
         replacedCount++;
         continue;
       }
 
-      // Check for standalone currency symbol
+      // Standalone currency symbol
       if (trimmed === fromSymbol || (fromCurrency === 'AUD' && trimmed === 'A$')) {
         textNode.textContent = originalText.replace(trimmed, toSymbol);
         symbolCount++;
+        replacedSymbolNodes.push(textNode);
         continue;
       }
 
-      // For text that contains a price within other text (e.g., "Starting at $19/mo")
+      // Partial match: price within longer text (e.g., "₹399/pass", "$49 per 100 sessions")
       let replaced = false;
       for (const key of sortedKeys) {
         if (key.length < 2) continue;
@@ -302,11 +312,33 @@
       }
 
       if (!replaced && originalText.includes(fromSymbol)) {
-        // Replace standalone symbol occurrences in mixed text
         if (fromSymbol !== '$' || !originalText.includes('A$')) {
           textNode.textContent = originalText.split(fromSymbol).join(toSymbol);
           symbolCount++;
+          replacedSymbolNodes.push(textNode);
         }
+      }
+    }
+
+    // Second pass: handle React-split nodes where symbol and number are adjacent text nodes
+    // e.g., <!-- -->$<!-- -->5<!-- -->/pass creates "$" + "5" + "/pass" as separate text nodes
+    for (const symNode of replacedSymbolNodes) {
+      let next = symNode.nextSibling;
+      while (next && next.nodeType === Node.COMMENT_NODE) next = next.nextSibling;
+      if (!next || next.nodeType !== Node.TEXT_NODE) continue;
+      const nextText = next.textContent;
+      const nextTrimmed = nextText.trim();
+      if (!nextTrimmed) continue;
+      if (conversionMap[nextTrimmed] !== undefined) continue;
+      const numMatch = nextTrimmed.match(/^(\d[\d,]*(?:\.\d+)?)/);
+      if (!numMatch) continue;
+      const numPart = numMatch[1];
+      const fullKey = fromSymbol + numPart;
+      if (conversionMap[fullKey]) {
+        const toVal = conversionMap[fullKey];
+        const numOnly = toVal.startsWith(toSymbol) ? toVal.slice(toSymbol.length) : toVal;
+        next.textContent = nextText.replace(numPart, numOnly);
+        replacedCount++;
       }
     }
 
@@ -357,15 +389,41 @@
 
     const total = replaceAllPrices(conversionMap, fromCurrency, newCurrency);
 
+    // Save the conversion map for the observer to reuse on lazy-loaded content
+    activeConversionMap = conversionMap;
+    activeFromCurrency = fromCurrency;
+    activeToCurrency = newCurrency;
+
     if (total > 0) {
       currentDisplayCurrency = newCurrency;
       log('Display currency updated to', newCurrency, `(${total} replacements)`);
     } else {
       log('Warning: 0 replacements made. DOM may not contain expected price text.');
+      currentDisplayCurrency = newCurrency;
     }
   }
 
-  // ── Parsing __NEXT_DATA__ ─────────────────────���───────────────────────────
+  // ── Reapply on lazy-loaded content ─────────────────────────────────────────
+
+  function reapplyOnNewContent() {
+    if (!activeConversionMap || !activeFromCurrency || !activeToCurrency) return;
+    if (selectedCurrency === originalPageCurrency) return;
+
+    // Build a map from the ORIGINAL page currency to selected currency.
+    // Lazy-loaded elements arrive in the original page currency,
+    // while already-converted elements are in the selected currency
+    // (and won't match the original-currency keys).
+    const freshMap = buildConversionMap(originalPageCurrency, selectedCurrency);
+    if (Object.keys(freshMap).length === 0) return;
+
+    log('Re-applying conversion for lazy-loaded content:', originalPageCurrency, '→', selectedCurrency);
+    const total = replaceAllPrices(freshMap, originalPageCurrency, selectedCurrency);
+    if (total > 0) {
+      log('Lazy-loaded content: replaced', total, 'nodes');
+    }
+  }
+
+  // ── Parsing __NEXT_DATA__ ──────────────────────────────────────────────────
 
   function parseNextData() {
     const script = document.getElementById('__NEXT_DATA__');
@@ -390,11 +448,13 @@
     if (location.href !== lastUrl) {
       log('URL changed:', lastUrl, '→', location.href);
       lastUrl = location.href;
-      // Re-init after a short delay to let new content render
       setTimeout(() => {
+        originalPageCurrency = null;
         currentDisplayCurrency = null;
+        activeConversionMap = null;
         parseNextData();
-        currentDisplayCurrency = detectCurrentCurrency();
+        originalPageCurrency = detectCurrentCurrency();
+        currentDisplayCurrency = originalPageCurrency;
         if (selectedCurrency !== currentDisplayCurrency) {
           applyCurrency(selectedCurrency);
         }
@@ -408,29 +468,21 @@
     if (domObserver) domObserver.disconnect();
 
     domObserver = new MutationObserver((mutations) => {
-      // Check for URL change on every mutation (catches pushState navigation)
       checkUrlChange();
 
-      const hasSignificantChange = mutations.some(
-        m => m.addedNodes.length > 3 || (m.type === 'childList' && m.target.querySelectorAll && m.target.querySelectorAll('[class*="pric"]').length > 0)
-      );
-      if (!hasSignificantChange) return;
+      const hasNewNodes = mutations.some(m => m.addedNodes.length > 0);
+      if (!hasNewNodes) return;
 
       clearTimeout(observerDebounce);
       observerDebounce = setTimeout(() => {
-        log('Significant DOM change detected — checking prices');
-        // Re-detect because new content was rendered by Next.js
-        const freshDetected = detectCurrentCurrency();
-        if (freshDetected !== selectedCurrency) {
-          currentDisplayCurrency = freshDetected;
-          applyCurrency(selectedCurrency);
+        if (selectedCurrency !== originalPageCurrency) {
+          reapplyOnNewContent();
         }
-      }, 600);
+      }, 400);
     });
 
     domObserver.observe(document.body, { childList: true, subtree: true });
 
-    // Also intercept history pushState/replaceState for SPA navigation
     const origPushState = history.pushState;
     const origReplaceState = history.replaceState;
 
@@ -456,8 +508,9 @@
         return;
       }
 
-      currentDisplayCurrency = detectCurrentCurrency();
-      log('Detected page currency:', currentDisplayCurrency);
+      originalPageCurrency = detectCurrentCurrency();
+      currentDisplayCurrency = originalPageCurrency;
+      log('Detected page currency:', originalPageCurrency);
 
       chrome.storage.sync.get(['selectedCurrency'], (result) => {
         selectedCurrency = result.selectedCurrency || currentDisplayCurrency;
