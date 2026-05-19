@@ -1,321 +1,554 @@
 (function () {
   'use strict';
 
-  if (window.__fwCurrencySwitcherLoaded) return;
-  window.__fwCurrencySwitcherLoaded = true;
+  if (window.__fwCurrencyDomSwitcherLoaded) return;
+  window.__fwCurrencyDomSwitcherLoaded = true;
+
+  const DEBUG = true;
+
+  function log(...args) {
+    if (DEBUG) console.log('[FW Currency]', ...args);
+  }
 
   const CURRENCIES = {
-    USD: { symbol: '$', locale: 'en-US', key: 'Usd', label: 'USD' },
-    INR: { symbol: '₹', locale: 'en-IN', key: 'Inr', label: 'INR' },
-    EUR: { symbol: '€', locale: 'de-DE', key: 'Eur', label: 'EUR' },
-    GBP: { symbol: '£', locale: 'en-GB', key: 'Gbp', label: 'GBP' },
-    AUD: { symbol: 'A$', locale: 'en-AU', key: 'Aud', label: 'AUD' },
+    USD: { symbol: '$',  locale: 'en-US', key: 'Usd' },
+    INR: { symbol: '₹', locale: 'en-IN', key: 'Inr' },
+    EUR: { symbol: '€', locale: 'de-DE', key: 'Eur' },
+    GBP: { symbol: '£', locale: 'en-GB', key: 'Gbp' },
+    AUD: { symbol: 'A$', locale: 'en-AU', key: 'Aud' },
   };
 
-  let plans = [];
-  let activeCurrency = 'USD';
-  let overlayEl = null;
+  let pricingTable = [];
+  let selectedCurrency = 'USD';
+  let currentDisplayCurrency = null;
+  let originalPageCurrency = null;
+  let activeConversionMap = null;
+  let activeFromCurrency = null;
+  let activeToCurrency = null;
+  let domObserver = null;
+  let observerDebounce = null;
+  let lastUrl = location.href;
+
+  // ── Utilities ──────────────────────────────────────────────────────────────
+
+  function toNum(val) {
+    if (val === null || val === undefined) return null;
+    if (typeof val === 'number') return isNaN(val) ? null : val;
+    // Strip commas, then extract leading number (handles "399/pass", "2399/agent/month")
+    const cleaned = String(val).replace(/,/g, '');
+    const match = cleaned.match(/^(\d+(?:\.\d+)?)/);
+    if (!match) return null;
+    const n = Number(match[1]);
+    return isNaN(n) ? null : n;
+  }
+
+  function formatNumber(amount, currency) {
+    const num = Number(amount);
+    if (isNaN(num)) return String(amount);
+    const info = CURRENCIES[currency];
+    const locale = info ? info.locale : 'en-US';
+    if (num !== Math.floor(num)) {
+      return num.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+    return num.toLocaleString(locale, { maximumFractionDigits: 0 });
+  }
+
+  function formatPrice(amount, currency) {
+    const num = Number(amount);
+    if (isNaN(num)) return String(amount);
+    const info = CURRENCIES[currency];
+    const symbol = info ? info.symbol : '';
+    return `${symbol}${formatNumber(num, currency)}`;
+  }
 
   // ── Data extraction ────────────────────────────────────────────────────────
 
-  function parseNextData() {
-    const el = document.getElementById('__NEXT_DATA__');
-    if (!el) return null;
-    try {
-      return JSON.parse(el.textContent);
-    } catch (e) {
-      console.warn('[FW Currency] Failed to parse __NEXT_DATA__:', e);
-      return null;
-    }
-  }
-
-  function collectPlanObjects(obj, visited = new WeakSet(), results = []) {
+  function collectRawPriceObjects(obj, visited = new WeakSet(), results = []) {
     if (!obj || typeof obj !== 'object') return results;
     if (visited.has(obj)) return results;
     visited.add(obj);
 
     if (Array.isArray(obj)) {
-      for (const item of obj) collectPlanObjects(item, visited, results);
+      for (const item of obj) collectRawPriceObjects(item, visited, results);
       return results;
     }
 
-    const keys = Object.keys(obj);
-    const hasPriceField = keys.some((k) => /^price(Usd|Inr|Eur|Gbp|Aud)/i.test(k));
-    if (hasPriceField) results.push(obj);
+    if (Object.keys(obj).some(k => /^price(Usd|Inr|Eur|Gbp|Aud)/i.test(k))) {
+      results.push(obj);
+    }
 
     for (const val of Object.values(obj)) {
-      if (val && typeof val === 'object') collectPlanObjects(val, visited, results);
+      if (val && typeof val === 'object') collectRawPriceObjects(val, visited, results);
     }
 
     return results;
   }
 
-  function extractName(obj) {
-    for (const field of ['name', 'planName', 'title', 'displayName', 'planTitle', 'heading']) {
-      if (typeof obj[field] === 'string' && obj[field].trim()) return obj[field].trim();
+  function collectLocalePriceGroups(obj, visited = new WeakSet(), groups = []) {
+    if (!obj || typeof obj !== 'object') return groups;
+    if (visited.has(obj)) return groups;
+    visited.add(obj);
+
+    if (Array.isArray(obj)) {
+      const isLocaleGroup =
+        obj.length >= 2 &&
+        obj.every(
+          item =>
+            item &&
+            typeof item === 'object' &&
+            item.fields &&
+            typeof item.fields.currency === 'string' &&
+            (item.fields.monthly !== undefined || item.fields.annual !== undefined)
+        );
+      if (isLocaleGroup) {
+        const flat = obj.map(item => ({
+          currency: item.fields.currency,
+          monthly: item.fields.monthly,
+          annual: item.fields.annual,
+        }));
+        groups.push(flat);
+      }
+
+      const isDirectGroup =
+        obj.length >= 2 &&
+        obj.every(
+          item =>
+            item &&
+            typeof item === 'object' &&
+            typeof item.currency === 'string' &&
+            (item.monthly !== undefined || item.annual !== undefined)
+        );
+      if (isDirectGroup && !isLocaleGroup) {
+        groups.push(obj);
+      }
+
+      for (const item of obj) collectLocalePriceGroups(item, visited, groups);
+      return groups;
     }
-    return null;
+
+    for (const val of Object.values(obj)) {
+      if (val && typeof val === 'object') collectLocalePriceGroups(val, visited, groups);
+    }
+
+    return groups;
   }
 
-  function toNumber(val) {
-    if (val === null || val === undefined) return null;
-    const n = Number(val);
-    return isNaN(n) ? null : n;
-  }
+  function buildPricingTable(nextData) {
+    const seen = new Set();
+    const table = [];
 
-  function buildPlans(rawObjects) {
-    const seen = new Map();
+    function addEntry(entry) {
+      const hasAny = Object.keys(CURRENCIES).some(
+        c => entry[c].monthly !== null || entry[c].annual !== null
+      );
+      if (!hasAny) return;
+
+      const key = Object.keys(CURRENCIES)
+        .map(c => `${c}:${entry[c].monthly}:${entry[c].annual}`)
+        .join('|');
+      if (seen.has(key)) return;
+      seen.add(key);
+      table.push(entry);
+    }
+
+    const rawObjects = collectRawPriceObjects(nextData);
+    log('Raw price objects found:', rawObjects.length);
 
     for (const obj of rawObjects) {
-      const name = extractName(obj) || 'Unnamed Plan';
-      const prices = {};
-
-      for (const [currency, info] of Object.entries(CURRENCIES)) {
+      const entry = {};
+      for (const [code, info] of Object.entries(CURRENCIES)) {
         const k = info.key;
-        const monthly = toNumber(obj[`price${k}`] ?? obj[`price${k.toLowerCase()}`]);
-        const annual = toNumber(obj[`price${k}Annual`] ?? obj[`price${k.toLowerCase()}Annual`]);
-        prices[currency] = { monthly, annual };
+        entry[code] = {
+          monthly: toNum(obj[`price${k}`] ?? null),
+          annual:  toNum(obj[`price${k}Annual`] ?? null),
+        };
       }
-
-      // Dedup by USD monthly + name
-      const dedupKey = `${name}|${prices.USD.monthly}|${prices.USD.annual}`;
-      if (!seen.has(dedupKey)) {
-        seen.set(dedupKey, { name, prices });
-      }
+      addEntry(entry);
     }
 
-    return Array.from(seen.values());
-  }
+    const entityGroups = collectLocalePriceGroups(nextData);
+    log('Entity/locale price groups found:', entityGroups.length);
 
-  // ── Formatting ─────────────────────────────────────────────────────────────
-
-  function formatPrice(amount, currency) {
-    if (amount === null || amount === undefined) return '—';
-    if (amount === 0) return 'Free';
-    try {
-      return new Intl.NumberFormat(CURRENCIES[currency].locale, {
-        style: 'currency',
-        currency,
-        minimumFractionDigits: 0,
-        maximumFractionDigits: 2,
-      }).format(amount);
-    } catch {
-      return `${CURRENCIES[currency].symbol}${amount}`;
+    for (const group of entityGroups) {
+      const entry = {};
+      for (const [code, info] of Object.entries(CURRENCIES)) {
+        const item = group.find(
+          g =>
+            g.currency === info.key ||
+            g.currency === info.key.toUpperCase() ||
+            g.currency === code
+        );
+        entry[code] = {
+          monthly: item ? toNum(item.monthly) : null,
+          annual:  item ? toNum(item.annual)  : null,
+        };
+      }
+      addEntry(entry);
     }
-  }
 
-  function escapeHtml(str) {
-    return String(str).replace(/[&<>"']/g, (c) =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])
-    );
+    log('Pricing table built. Unique entries:', table.length);
+    if (table.length > 0 && DEBUG) {
+      log('First 5 entries:', JSON.stringify(table.slice(0, 5), null, 2));
+    }
+
+    return table;
   }
 
   // ── Currency detection ─────────────────────────────────────────────────────
 
   function detectCurrentCurrency() {
-    const text = document.body.innerText.slice(0, 5000);
+    const text = document.body.innerText.slice(0, 15000);
     if (text.includes('₹')) return 'INR';
     if (text.includes('A$')) return 'AUD';
     if (text.includes('€')) return 'EUR';
     if (text.includes('£')) return 'GBP';
+    if (text.includes('$')) return 'USD';
     return 'USD';
   }
 
-  // ── Overlay UI ─────────────────────────────────────────────────────────────
+  // ── Conversion map ─────────────────────────────────────────────────────────
 
-  function renderPricingContent() {
-    const content = document.getElementById('fw-cs-content');
-    if (!content) return;
+  function buildConversionMap(fromCurrency, toCurrency) {
+    const map = {};
 
-    if (!plans.length) {
-      content.innerHTML =
-        '<p class="fw-cs-empty">No pricing data found on this page.</p>';
+    for (const entry of pricingTable) {
+      const pairs = [
+        [entry[fromCurrency]?.monthly, entry[toCurrency]?.monthly],
+        [entry[fromCurrency]?.annual, entry[toCurrency]?.annual],
+      ];
+
+      for (const [fromVal, toVal] of pairs) {
+        if (fromVal == null || toVal == null) continue;
+
+        const toFormatted = formatPrice(toVal, toCurrency);
+        const toNumberOnly = formatNumber(toVal, toCurrency);
+
+        // Full formatted with symbol: "$19" or "₹1,399"
+        map[formatPrice(fromVal, fromCurrency)] = toFormatted;
+        // Number with locale formatting: "19" or "1,399"
+        const fromNumFormatted = formatNumber(fromVal, fromCurrency);
+        if (fromNumFormatted.length >= 2) {
+          map[fromNumFormatted] = toNumberOnly;
+        }
+        // Raw number string (only if 2+ chars to avoid false matches)
+        const rawStr = String(Math.round(fromVal));
+        if (rawStr.length >= 2 && !map[rawStr]) {
+          map[rawStr] = toNumberOnly;
+        }
+        // Decimal values: add minimal form too (e.g., "1.5" alongside "1.50")
+        if (fromVal !== Math.floor(fromVal)) {
+          const fromInfo = CURRENCIES[fromCurrency];
+          const minForm = fromVal.toLocaleString(fromInfo.locale, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+          if (minForm !== fromNumFormatted && minForm.length >= 2) {
+            if (!map[minForm]) map[minForm] = toNumberOnly;
+            if (!map[fromInfo.symbol + minForm]) map[fromInfo.symbol + minForm] = toFormatted;
+          }
+        }
+      }
+    }
+
+    return map;
+  }
+
+  // ── DOM replacement ────────────────────────────────────────────────────────
+
+  function replaceAllPrices(conversionMap, fromCurrency, toCurrency) {
+    const fromSymbol = CURRENCIES[fromCurrency].symbol;
+    const toSymbol = CURRENCIES[toCurrency].symbol;
+    let replacedCount = 0;
+    let symbolCount = 0;
+    const replacedSymbolNodes = [];
+
+    const sortedKeys = Object.keys(conversionMap).sort((a, b) => b.length - a.length);
+
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_TEXT,
+      null
+    );
+
+    const textNodes = [];
+    let node;
+    while ((node = walker.nextNode())) {
+      const parent = node.parentElement;
+      if (parent && (parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE' || parent.tagName === 'NOSCRIPT')) {
+        continue;
+      }
+      textNodes.push(node);
+    }
+
+    log('Total text nodes scanned:', textNodes.length);
+
+    for (const textNode of textNodes) {
+      const originalText = textNode.textContent;
+      const trimmed = originalText.trim();
+      if (!trimmed) continue;
+
+      // Exact match (most common for price spans like "$19" or "4,299")
+      if (conversionMap[trimmed] !== undefined) {
+        textNode.textContent = originalText.replace(trimmed, conversionMap[trimmed]);
+        replacedCount++;
+        continue;
+      }
+
+      // Standalone currency symbol
+      if (trimmed === fromSymbol || (fromCurrency === 'AUD' && trimmed === 'A$')) {
+        textNode.textContent = originalText.replace(trimmed, toSymbol);
+        symbolCount++;
+        replacedSymbolNodes.push(textNode);
+        continue;
+      }
+
+      // Partial match: price within longer text (e.g., "₹399/pass", "$49 per 100 sessions")
+      let replaced = false;
+      for (const key of sortedKeys) {
+        if (key.length < 2) continue;
+        if (originalText.includes(key)) {
+          textNode.textContent = originalText.split(key).join(conversionMap[key]);
+          replacedCount++;
+          replaced = true;
+          break;
+        }
+      }
+
+      if (!replaced && originalText.includes(fromSymbol)) {
+        if (fromSymbol !== '$' || !originalText.includes('A$')) {
+          textNode.textContent = originalText.split(fromSymbol).join(toSymbol);
+          symbolCount++;
+          replacedSymbolNodes.push(textNode);
+        }
+      }
+    }
+
+    // Second pass: handle React-split nodes where symbol and number are adjacent text nodes
+    // e.g., <!-- -->$<!-- -->5<!-- -->/pass creates "$" + "5" + "/pass" as separate text nodes
+    for (const symNode of replacedSymbolNodes) {
+      let next = symNode.nextSibling;
+      while (next && next.nodeType === Node.COMMENT_NODE) next = next.nextSibling;
+      if (!next || next.nodeType !== Node.TEXT_NODE) continue;
+      const nextText = next.textContent;
+      const nextTrimmed = nextText.trim();
+      if (!nextTrimmed) continue;
+      if (conversionMap[nextTrimmed] !== undefined) continue;
+      const numMatch = nextTrimmed.match(/^(\d[\d,]*(?:\.\d+)?)/);
+      if (!numMatch) continue;
+      const numPart = numMatch[1];
+      const fullKey = fromSymbol + numPart;
+      if (conversionMap[fullKey]) {
+        const toVal = conversionMap[fullKey];
+        const numOnly = toVal.startsWith(toSymbol) ? toVal.slice(toSymbol.length) : toVal;
+        next.textContent = nextText.replace(numPart, numOnly);
+        replacedCount++;
+      }
+    }
+
+    log(`Replaced ${replacedCount} price nodes, ${symbolCount} symbol nodes`);
+    return replacedCount + symbolCount;
+  }
+
+  // ── Apply currency ─────────────────────────────────────────────────────────
+
+  function applyCurrency(newCurrency) {
+    if (!CURRENCIES[newCurrency]) {
+      log('Unknown currency:', newCurrency);
       return;
     }
 
-    content.innerHTML = plans
-      .map((plan) => {
-        const p = plan.prices[activeCurrency];
-        const monthly = formatPrice(p?.monthly, activeCurrency);
-        const annual = formatPrice(p?.annual, activeCurrency);
-        return `
-          <div class="fw-cs-plan">
-            <div class="fw-cs-plan-name">${escapeHtml(plan.name)}</div>
-            <div class="fw-cs-plan-prices">
-              <div class="fw-cs-price-item">
-                <span class="fw-cs-price-label">Monthly</span>
-                <span class="fw-cs-price-value">${escapeHtml(monthly)}</span>
-              </div>
-              <div class="fw-cs-price-item">
-                <span class="fw-cs-price-label">Annual</span>
-                <span class="fw-cs-price-value">${escapeHtml(annual)}</span>
-              </div>
-            </div>
-          </div>`;
-      })
-      .join('');
-  }
+    const fromCurrency = currentDisplayCurrency || detectCurrentCurrency();
+    log('Applying currency switch:', fromCurrency, '→', newCurrency);
 
-  function renderAllCurrenciesForPlan(plan) {
-    return Object.entries(CURRENCIES)
-      .map(([code]) => {
-        const p = plan.prices[code];
-        return `
-          <tr class="${code === activeCurrency ? 'fw-cs-tr-active' : ''}">
-            <td class="fw-cs-td-cur">${CURRENCIES[code].symbol} ${code}</td>
-            <td>${escapeHtml(formatPrice(p?.monthly, code))}</td>
-            <td>${escapeHtml(formatPrice(p?.annual, code))}</td>
-          </tr>`;
-      })
-      .join('');
-  }
+    selectedCurrency = newCurrency;
 
-  function showComparePanelFor(plan) {
-    let modal = document.getElementById('fw-cs-modal');
-    if (!modal) {
-      modal = document.createElement('div');
-      modal.id = 'fw-cs-modal';
-      document.body.appendChild(modal);
+    if (fromCurrency === newCurrency) {
+      log('Already showing', newCurrency);
+      return;
     }
 
-    modal.innerHTML = `
-      <div class="fw-cs-modal-backdrop" id="fw-cs-modal-backdrop"></div>
-      <div class="fw-cs-modal-box">
-        <div class="fw-cs-modal-header">
-          <span>${escapeHtml(plan.name)} — All Currencies</span>
-          <button class="fw-cs-modal-close" id="fw-cs-modal-close">✕</button>
-        </div>
-        <table class="fw-cs-modal-table">
-          <thead>
-            <tr>
-              <th>Currency</th>
-              <th>Monthly / agent</th>
-              <th>Annual / agent</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${renderAllCurrenciesForPlan(plan)}
-          </tbody>
-        </table>
-      </div>`;
+    if (pricingTable.length === 0) {
+      log('Warning: pricing table is empty, attempting re-parse');
+      parseNextData();
+      if (pricingTable.length === 0) {
+        log('Error: still no pricing data');
+        return;
+      }
+    }
 
-    modal.classList.add('visible');
+    const conversionMap = buildConversionMap(fromCurrency, newCurrency);
+    const keyCount = Object.keys(conversionMap).length;
+    log('Conversion map keys:', keyCount);
 
-    modal.querySelector('#fw-cs-modal-backdrop').addEventListener('click', () =>
-      modal.classList.remove('visible')
-    );
-    modal.querySelector('#fw-cs-modal-close').addEventListener('click', () =>
-      modal.classList.remove('visible')
-    );
+    if (keyCount === 0) {
+      log('Warning: empty conversion map');
+      return;
+    }
+
+    if (DEBUG) {
+      const sample = Object.entries(conversionMap).slice(0, 8);
+      log('Sample mappings:', sample.map(([k, v]) => `"${k}" → "${v}"`).join(', '));
+    }
+
+    const total = replaceAllPrices(conversionMap, fromCurrency, newCurrency);
+
+    // Save the conversion map for the observer to reuse on lazy-loaded content
+    activeConversionMap = conversionMap;
+    activeFromCurrency = fromCurrency;
+    activeToCurrency = newCurrency;
+
+    if (total > 0) {
+      currentDisplayCurrency = newCurrency;
+      log('Display currency updated to', newCurrency, `(${total} replacements)`);
+    } else {
+      log('Warning: 0 replacements made. DOM may not contain expected price text.');
+      currentDisplayCurrency = newCurrency;
+    }
   }
 
-  function applyActiveCurrency(currency) {
-    activeCurrency = currency;
-    const label = document.getElementById('fw-cs-badge-label');
-    if (label) label.textContent = currency;
+  // ── Reapply on lazy-loaded content ─────────────────────────────────────────
 
-    overlayEl?.querySelectorAll('.fw-cs-cur-btn').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.currency === currency);
-    });
+  function reapplyOnNewContent() {
+    if (!activeConversionMap || !activeFromCurrency || !activeToCurrency) return;
+    if (selectedCurrency === originalPageCurrency) return;
 
-    renderPricingContent();
+    // Build a map from the ORIGINAL page currency to selected currency.
+    // Lazy-loaded elements arrive in the original page currency,
+    // while already-converted elements are in the selected currency
+    // (and won't match the original-currency keys).
+    const freshMap = buildConversionMap(originalPageCurrency, selectedCurrency);
+    if (Object.keys(freshMap).length === 0) return;
+
+    log('Re-applying conversion for lazy-loaded content:', originalPageCurrency, '→', selectedCurrency);
+    const total = replaceAllPrices(freshMap, originalPageCurrency, selectedCurrency);
+    if (total > 0) {
+      log('Lazy-loaded content: replaced', total, 'nodes');
+    }
   }
 
-  function createOverlay() {
-    const el = document.createElement('div');
-    el.id = 'fw-cs-overlay';
+  // ── Parsing __NEXT_DATA__ ──────────────────────────────────────────────────
 
-    el.innerHTML = `
-      <div class="fw-cs-badge" id="fw-cs-badge" title="Freshworks Currency Switcher">
-        <span class="fw-cs-badge-icon">💱</span>
-        <span id="fw-cs-badge-label">${activeCurrency}</span>
-      </div>
-      <div class="fw-cs-panel" id="fw-cs-panel">
-        <div class="fw-cs-panel-header">
-          <span class="fw-cs-panel-title">💱 Freshworks Pricing</span>
-          <button class="fw-cs-panel-close" id="fw-cs-panel-close" title="Close">✕</button>
-        </div>
-        <div class="fw-cs-cur-row">
-          ${Object.entries(CURRENCIES)
-            .map(
-              ([code, info]) => `
-            <button class="fw-cs-cur-btn${code === activeCurrency ? ' active' : ''}" data-currency="${code}" title="${info.label}">
-              ${info.symbol}&nbsp;${code}
-            </button>`
-            )
-            .join('')}
-        </div>
-        <div class="fw-cs-content" id="fw-cs-content"></div>
-        <div class="fw-cs-panel-footer">
-          Click a plan row to compare all currencies
-        </div>
-      </div>`;
+  function parseNextData() {
+    const script = document.getElementById('__NEXT_DATA__');
+    if (!script) {
+      log('Warning: No __NEXT_DATA__ found');
+      return false;
+    }
 
-    document.body.appendChild(el);
+    try {
+      const nextData = JSON.parse(script.textContent);
+      pricingTable = buildPricingTable(nextData);
+      return pricingTable.length > 0;
+    } catch (e) {
+      log('Error parsing __NEXT_DATA__:', e);
+      return false;
+    }
+  }
 
-    const badge = el.querySelector('#fw-cs-badge');
-    const panel = el.querySelector('#fw-cs-panel');
+  // ── URL change detection (SPA navigation) ─────────────────────────────────
 
-    badge.addEventListener('click', () => {
-      const isOpen = panel.classList.toggle('visible');
-      if (isOpen) renderPricingContent();
+  function checkUrlChange() {
+    if (location.href !== lastUrl) {
+      log('URL changed:', lastUrl, '→', location.href);
+      lastUrl = location.href;
+      setTimeout(() => {
+        originalPageCurrency = null;
+        currentDisplayCurrency = null;
+        activeConversionMap = null;
+        parseNextData();
+        originalPageCurrency = detectCurrentCurrency();
+        currentDisplayCurrency = originalPageCurrency;
+        if (selectedCurrency !== currentDisplayCurrency) {
+          applyCurrency(selectedCurrency);
+        }
+      }, 800);
+    }
+  }
+
+  // ── MutationObserver ──────────────────────────────────────────────────────
+
+  function startObserver() {
+    if (domObserver) domObserver.disconnect();
+
+    domObserver = new MutationObserver((mutations) => {
+      checkUrlChange();
+
+      const hasNewNodes = mutations.some(m => m.addedNodes.length > 0);
+      if (!hasNewNodes) return;
+
+      clearTimeout(observerDebounce);
+      observerDebounce = setTimeout(() => {
+        if (selectedCurrency !== originalPageCurrency) {
+          reapplyOnNewContent();
+        }
+      }, 400);
     });
 
-    el.querySelector('#fw-cs-panel-close').addEventListener('click', () =>
-      panel.classList.remove('visible')
-    );
+    domObserver.observe(document.body, { childList: true, subtree: true });
 
-    el.querySelectorAll('.fw-cs-cur-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const currency = btn.dataset.currency;
-        applyActiveCurrency(currency);
-        chrome.storage.sync.set({ selectedCurrency: currency });
-      });
-    });
+    const origPushState = history.pushState;
+    const origReplaceState = history.replaceState;
 
-    el.querySelector('#fw-cs-content').addEventListener('click', (e) => {
-      const row = e.target.closest('.fw-cs-plan');
-      if (!row) return;
-      const index = Array.from(el.querySelectorAll('.fw-cs-plan')).indexOf(row);
-      if (plans[index]) showComparePanelFor(plans[index]);
-    });
+    history.pushState = function (...args) {
+      origPushState.apply(this, args);
+      setTimeout(checkUrlChange, 100);
+    };
+    history.replaceState = function (...args) {
+      origReplaceState.apply(this, args);
+      setTimeout(checkUrlChange, 100);
+    };
+    window.addEventListener('popstate', () => setTimeout(checkUrlChange, 100));
 
-    return el;
+    log('Observer and navigation hooks started');
   }
 
   // ── Init ───────────────────────────────────────────────────────────────────
 
   function init() {
-    const nextData = parseNextData();
-    if (nextData) {
-      const rawObjects = collectPlanObjects(nextData);
-      plans = buildPlans(rawObjects);
-      if (!plans.length) {
-        console.warn('[FW Currency] No plan pricing objects found in __NEXT_DATA__');
+    try {
+      if (!parseNextData()) {
+        log('Warning: No pricing data found in __NEXT_DATA__');
+        return;
       }
-    } else {
-      console.warn('[FW Currency] __NEXT_DATA__ not found on this page');
+
+      originalPageCurrency = detectCurrentCurrency();
+      currentDisplayCurrency = originalPageCurrency;
+      log('Detected page currency:', originalPageCurrency);
+
+      chrome.storage.sync.get(['selectedCurrency'], (result) => {
+        selectedCurrency = result.selectedCurrency || currentDisplayCurrency;
+        log('User preference:', selectedCurrency);
+
+        if (selectedCurrency !== currentDisplayCurrency) {
+          applyCurrency(selectedCurrency);
+        }
+
+        startObserver();
+      });
+    } catch (e) {
+      console.warn('[FW Currency] Error during init:', e);
     }
-
-    activeCurrency = detectCurrentCurrency();
-
-    chrome.storage.sync.get(['selectedCurrency'], (result) => {
-      if (result.selectedCurrency && CURRENCIES[result.selectedCurrency]) {
-        activeCurrency = result.selectedCurrency;
-      }
-      overlayEl = createOverlay();
-    });
-
-    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (message.type === 'PING') {
-        sendResponse({ pong: true, currency: activeCurrency });
-        return true;
-      }
-      if (message.type === 'SET_CURRENCY' && CURRENCIES[message.currency]) {
-        applyActiveCurrency(message.currency);
-      }
-    });
   }
+
+  // ── Message listener ───────────────────────────────────────────────────────
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message.type === 'PING') {
+      sendResponse({ pong: true, currency: selectedCurrency });
+      return true;
+    }
+    if (message.type === 'SET_CURRENCY' && CURRENCIES[message.currency]) {
+      log('Received SET_CURRENCY:', message.currency);
+      try {
+        applyCurrency(message.currency);
+        chrome.storage.sync.set({ selectedCurrency: message.currency });
+        sendResponse({ success: true });
+      } catch (e) {
+        console.warn('[FW Currency] Error applying currency:', e);
+        sendResponse({ success: false, error: e.message });
+      }
+    }
+    return true;
+  });
+
+  // ── Bootstrap ──────────────────────────────────────────────────────────────
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
