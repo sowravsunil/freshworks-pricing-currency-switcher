@@ -28,6 +28,7 @@
   let domObserver = null;
   let observerDebounce = null;
   let lastUrl = location.href;
+  let pendingAddedNodes = [];
 
   // ── Utilities ──────────────────────────────────────────────────────────────
 
@@ -252,7 +253,7 @@
 
   // ── DOM replacement ────────────────────────────────────────────────────────
 
-  function replaceAllPrices(conversionMap, fromCurrency, toCurrency) {
+  function replaceAllPrices(conversionMap, fromCurrency, toCurrency, root = document.body) {
     const fromSymbol = CURRENCIES[fromCurrency].symbol;
     const toSymbol = CURRENCIES[toCurrency].symbol;
     let replacedCount = 0;
@@ -261,20 +262,32 @@
 
     const sortedKeys = Object.keys(conversionMap).sort((a, b) => b.length - a.length);
 
-    const walker = document.createTreeWalker(
-      document.body,
-      NodeFilter.SHOW_TEXT,
-      null
-    );
+    // Pre-compile boundary-aware patterns so "42" won't match inside "1,42,399".
+    const partialPatterns = sortedKeys
+      .filter(k => k.length >= 2)
+      .map(key => {
+        const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const src = `(?<![\\d,])${escaped}(?![\\d,])`;
+        return { key, test: new RegExp(src), replace: new RegExp(src, 'g') };
+      });
 
     const textNodes = [];
-    let node;
-    while ((node = walker.nextNode())) {
-      const parent = node.parentElement;
-      if (parent && (parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE' || parent.tagName === 'NOSCRIPT')) {
-        continue;
+
+    if (root.nodeType === Node.TEXT_NODE) {
+      const parent = root.parentElement;
+      if (!parent || (parent.tagName !== 'SCRIPT' && parent.tagName !== 'STYLE' && parent.tagName !== 'NOSCRIPT')) {
+        textNodes.push(root);
       }
-      textNodes.push(node);
+    } else {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+      let node;
+      while ((node = walker.nextNode())) {
+        const parent = node.parentElement;
+        if (parent && (parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE' || parent.tagName === 'NOSCRIPT')) {
+          continue;
+        }
+        textNodes.push(node);
+      }
     }
 
     log('Total text nodes scanned:', textNodes.length);
@@ -300,11 +313,11 @@
       }
 
       // Partial match: price within longer text (e.g., "₹399/pass", "$49 per 100 sessions")
+      // Boundary regex prevents "42" from matching inside "1,42,399".
       let replaced = false;
-      for (const key of sortedKeys) {
-        if (key.length < 2) continue;
-        if (originalText.includes(key)) {
-          textNode.textContent = originalText.split(key).join(conversionMap[key]);
+      for (const { key, test, replace } of partialPatterns) {
+        if (test.test(originalText)) {
+          textNode.textContent = originalText.replace(replace, conversionMap[key]);
           replacedCount++;
           replaced = true;
           break;
@@ -405,19 +418,21 @@
 
   // ── Reapply on lazy-loaded content ─────────────────────────────────────────
 
-  function reapplyOnNewContent() {
+  function reapplyOnNewContent(addedNodes) {
     if (!activeConversionMap || !activeFromCurrency || !activeToCurrency) return;
     if (selectedCurrency === originalPageCurrency) return;
 
-    // Build a map from the ORIGINAL page currency to selected currency.
-    // Lazy-loaded elements arrive in the original page currency,
-    // while already-converted elements are in the selected currency
-    // (and won't match the original-currency keys).
+    // Build from the ORIGINAL page currency so newly-added nodes (which arrive
+    // in the original currency) get converted. Already-converted nodes are not
+    // in addedNodes, so they are never re-processed.
     const freshMap = buildConversionMap(originalPageCurrency, selectedCurrency);
     if (Object.keys(freshMap).length === 0) return;
 
     log('Re-applying conversion for lazy-loaded content:', originalPageCurrency, '→', selectedCurrency);
-    const total = replaceAllPrices(freshMap, originalPageCurrency, selectedCurrency);
+    let total = 0;
+    for (const root of addedNodes) {
+      total += replaceAllPrices(freshMap, originalPageCurrency, selectedCurrency, root);
+    }
     if (total > 0) {
       log('Lazy-loaded content: replaced', total, 'nodes');
     }
@@ -452,6 +467,7 @@
         originalPageCurrency = null;
         currentDisplayCurrency = null;
         activeConversionMap = null;
+        pendingAddedNodes = [];
         parseNextData();
         originalPageCurrency = detectCurrentCurrency();
         currentDisplayCurrency = originalPageCurrency;
@@ -470,13 +486,19 @@
     domObserver = new MutationObserver((mutations) => {
       checkUrlChange();
 
-      const hasNewNodes = mutations.some(m => m.addedNodes.length > 0);
-      if (!hasNewNodes) return;
+      for (const m of mutations) {
+        for (const node of m.addedNodes) {
+          pendingAddedNodes.push(node);
+        }
+      }
+
+      if (pendingAddedNodes.length === 0) return;
 
       clearTimeout(observerDebounce);
       observerDebounce = setTimeout(() => {
+        const nodesToProcess = pendingAddedNodes.splice(0);
         if (selectedCurrency !== originalPageCurrency) {
-          reapplyOnNewContent();
+          reapplyOnNewContent(nodesToProcess);
         }
       }, 400);
     });
