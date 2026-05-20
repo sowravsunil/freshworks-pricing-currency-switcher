@@ -263,8 +263,10 @@
     const sortedKeys = Object.keys(conversionMap).sort((a, b) => b.length - a.length);
 
     // Pre-compile boundary-aware patterns so "42" won't match inside "1,42,399".
+    // Exclude pure-digit keys — they cause false positives on non-price numbers
+    // like "500" in "First 500 sessions included" or "100" in "per 100 sessions".
     const partialPatterns = sortedKeys
-      .filter(k => k.length >= 2)
+      .filter(k => k.length >= 2 && /\D/.test(k))
       .map(key => {
         const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const src = `(?<![\\d,])${escaped}(?![\\d,])`;
@@ -459,6 +461,29 @@
 
   // ── URL change detection (SPA navigation) ─────────────────────────────────
 
+  function requestFreshPageData(pathname) {
+    const handler = (e) => {
+      window.removeEventListener('__fw_page_data_response', handler);
+      try {
+        const data = JSON.parse(e.detail);
+        if (data && data.pageProps) {
+          log('Received fresh page data for', pathname);
+          pricingTable = buildPricingTable(data);
+          originalPageCurrency = detectCurrentCurrency();
+          currentDisplayCurrency = originalPageCurrency;
+          if (selectedCurrency !== currentDisplayCurrency) {
+            applyCurrency(selectedCurrency);
+          }
+        }
+      } catch (err) {
+        log('Error processing fresh page data:', err);
+      }
+    };
+    window.addEventListener('__fw_page_data_response', handler);
+    window.dispatchEvent(new CustomEvent('__fw_request_page_data', { detail: pathname }));
+    setTimeout(() => window.removeEventListener('__fw_page_data_response', handler), 5000);
+  }
+
   function checkUrlChange() {
     if (location.href !== lastUrl) {
       log('URL changed:', lastUrl, '→', location.href);
@@ -468,11 +493,19 @@
         currentDisplayCurrency = null;
         activeConversionMap = null;
         pendingAddedNodes = [];
+
+        const oldTableSize = pricingTable.length;
         parseNextData();
-        originalPageCurrency = detectCurrentCurrency();
-        currentDisplayCurrency = originalPageCurrency;
-        if (selectedCurrency !== currentDisplayCurrency) {
-          applyCurrency(selectedCurrency);
+
+        if (pricingTable.length <= oldTableSize) {
+          log('__NEXT_DATA__ may be stale, requesting fresh data via bridge');
+          requestFreshPageData(location.pathname);
+        } else {
+          originalPageCurrency = detectCurrentCurrency();
+          currentDisplayCurrency = originalPageCurrency;
+          if (selectedCurrency !== currentDisplayCurrency) {
+            applyCurrency(selectedCurrency);
+          }
         }
       }, 800);
     }
@@ -483,12 +516,18 @@
   function startObserver() {
     if (domObserver) domObserver.disconnect();
 
+    const observerOpts = { childList: true, subtree: true, characterData: true };
+
     domObserver = new MutationObserver((mutations) => {
       checkUrlChange();
 
       for (const m of mutations) {
-        for (const node of m.addedNodes) {
-          pendingAddedNodes.push(node);
+        if (m.type === 'childList') {
+          for (const node of m.addedNodes) {
+            pendingAddedNodes.push(node);
+          }
+        } else if (m.type === 'characterData' && m.target.nodeType === Node.TEXT_NODE) {
+          pendingAddedNodes.push(m.target);
         }
       }
 
@@ -498,12 +537,14 @@
       observerDebounce = setTimeout(() => {
         const nodesToProcess = pendingAddedNodes.splice(0);
         if (selectedCurrency !== originalPageCurrency) {
+          domObserver.disconnect();
           reapplyOnNewContent(nodesToProcess);
+          domObserver.observe(document.body, observerOpts);
         }
-      }, 400);
+      }, 200);
     });
 
-    domObserver.observe(document.body, { childList: true, subtree: true });
+    domObserver.observe(document.body, observerOpts);
 
     const origPushState = history.pushState;
     const origReplaceState = history.replaceState;
