@@ -7,6 +7,12 @@
   "content_scripts": [
     {
       "matches": ["https://www.freshworks.com/*/pricing/*"],
+      "js": ["content/bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.freshworks.com/*/pricing/*"],
       "js": ["content/content.js"],
       "css": ["content/content.css"],
       "run_at": "document_idle"
