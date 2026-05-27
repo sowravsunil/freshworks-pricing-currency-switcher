@@ -211,6 +211,18 @@
 
   function buildConversionMap(fromCurrency, toCurrency) {
     const map = {};
+    const frozen = new Set();
+
+    function setOnce(key, value) {
+      if (frozen.has(key)) {
+        if (map[key] !== value) {
+          log('Collision on "' + key + '": keeping "' + map[key] + '", skipping "' + value + '"');
+        }
+        return;
+      }
+      map[key] = value;
+      frozen.add(key);
+    }
 
     for (const entry of pricingTable) {
       const pairs = [
@@ -224,25 +236,24 @@
         const toFormatted = formatPrice(toVal, toCurrency);
         const toNumberOnly = formatNumber(toVal, toCurrency);
 
-        // Full formatted with symbol: "$19" or "₹1,399"
-        map[formatPrice(fromVal, fromCurrency)] = toFormatted;
-        // Number with locale formatting: "19" or "1,399"
+        setOnce(formatPrice(fromVal, fromCurrency), toFormatted);
+
         const fromNumFormatted = formatNumber(fromVal, fromCurrency);
         if (fromNumFormatted.length >= 2) {
-          map[fromNumFormatted] = toNumberOnly;
+          setOnce(fromNumFormatted, toNumberOnly);
         }
-        // Raw number string (only if 2+ chars to avoid false matches)
+
         const rawStr = String(Math.round(fromVal));
-        if (rawStr.length >= 2 && !map[rawStr]) {
-          map[rawStr] = toNumberOnly;
+        if (rawStr.length >= 2) {
+          setOnce(rawStr, toNumberOnly);
         }
-        // Decimal values: add minimal form too (e.g., "1.5" alongside "1.50")
+
         if (fromVal !== Math.floor(fromVal)) {
           const fromInfo = CURRENCIES[fromCurrency];
           const minForm = fromVal.toLocaleString(fromInfo.locale, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
           if (minForm !== fromNumFormatted && minForm.length >= 2) {
-            if (!map[minForm]) map[minForm] = toNumberOnly;
-            if (!map[fromInfo.symbol + minForm]) map[fromInfo.symbol + minForm] = toFormatted;
+            setOnce(minForm, toNumberOnly);
+            setOnce(fromInfo.symbol + minForm, toFormatted);
           }
         }
       }
@@ -451,6 +462,15 @@
 
     try {
       const nextData = JSON.parse(script.textContent);
+      const pageProps = nextData?.props?.pageProps;
+      if (pageProps) {
+        const scopedTable = buildPricingTable(pageProps);
+        if (scopedTable.length >= 2) {
+          pricingTable = scopedTable;
+          log('Using pageProps-scoped pricing data:', pricingTable.length, 'entries');
+          return true;
+        }
+      }
       pricingTable = buildPricingTable(nextData);
       return pricingTable.length > 0;
     } catch (e) {
@@ -468,7 +488,8 @@
         const data = JSON.parse(e.detail);
         if (data && data.pageProps) {
           log('Received fresh page data for', pathname);
-          pricingTable = buildPricingTable(data);
+          const scopedTable = buildPricingTable(data.pageProps);
+          pricingTable = scopedTable.length >= 2 ? scopedTable : buildPricingTable(data);
           originalPageCurrency = detectCurrentCurrency();
           currentDisplayCurrency = originalPageCurrency;
           if (selectedCurrency !== currentDisplayCurrency) {
