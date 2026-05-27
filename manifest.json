@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Freshworks Pricing Currency Switcher",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "View Freshworks pricing in USD, INR, EUR, GBP, or AUD — reads data already embedded in the page.",
   "permissions": ["activeTab", "storage"],
   "content_scripts": [
